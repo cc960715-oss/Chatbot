@@ -224,6 +224,9 @@ export async function startServer() {
 
   // Serve public static files cleanly (portraits in /public/assets/aistudio)
   app.use('/assets', express.static(path.join(__dirname, 'public', 'assets')));
+  app.get('/favicon.ico', (_req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'favicon.svg'));
+  });
 
   app.post('/api/chat', async (req, res) => {
     try {
