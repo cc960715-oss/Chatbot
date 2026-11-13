@@ -105,6 +105,7 @@ export default function App() {
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [failedPrompt, setFailedPrompt] = useState<string | null>(null);
   const [selectedPortrait, setSelectedPortrait] = useState<PortraitItem | null>(null);
   const [avatarError, setAvatarError] = useState(false);
 
@@ -130,6 +131,7 @@ export default function App() {
     ]);
     setInput('');
     setErrorMsg(null);
+    setFailedPrompt(null);
     setActiveTab('chat');
   };
 
@@ -138,20 +140,21 @@ export default function App() {
     if (!trimmed || isLoading) return;
 
     setErrorMsg(null);
+    setFailedPrompt(null);
 
     if (trimmed === '重新拜訪萬經閣' || trimmed === '【重新拜訪萬經閣】') {
       handleResetVisit();
       return;
     }
 
+    const previousMessages = messages;
     const userMsg: ChatMessage = {
       id: `user-${Date.now()}`,
       role: 'user',
       content: trimmed,
     };
 
-    const nextMessages = [...messages, userMsg];
-    setMessages(nextMessages);
+    setMessages([...previousMessages, userMsg]);
     setInput('');
     setIsLoading(true);
 
@@ -161,7 +164,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: trimmed,
-          history: messages.map((m) => ({ role: m.role, content: m.content })),
+          history: previousMessages.map((m) => ({ role: m.role, content: m.content })),
           state: gameState,
         }),
       });
@@ -185,8 +188,14 @@ export default function App() {
         },
       ]);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : '與萬經閣連線發生錯誤。';
-      setErrorMsg(msg);
+      setMessages(previousMessages);
+      setFailedPrompt(trimmed);
+      const rawMsg = err instanceof Error ? err.message : '與萬經閣連線發生錯誤。';
+      const friendlyMsg =
+        rawMsg.includes('503') || rawMsg.includes('UNAVAILABLE') || rawMsg.includes('high demand')
+          ? '萬界樹靈脈目前請求過多（模型暫時高負載 503），請點擊重試或稍候幾秒再送出。'
+          : rawMsg;
+      setErrorMsg(friendlyMsg);
     } finally {
       setIsLoading(false);
     }
@@ -423,8 +432,17 @@ export default function App() {
                 )}
 
                 {errorMsg && (
-                  <div className="border border-[#991B1B]/40 bg-[#991B1B]/5 px-4 py-3 text-sm text-[#991B1B]">
-                    {errorMsg}
+                  <div className="border border-[#991B1B]/40 bg-[#991B1B]/5 px-4 py-3 text-sm text-[#991B1B] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <span>{errorMsg}</span>
+                    {failedPrompt && (
+                      <button
+                        type="button"
+                        onClick={() => sendMessage(failedPrompt)}
+                        className="px-3.5 py-1.5 text-xs font-medium bg-[#991B1B] text-[#FBF9F5] hover:bg-red-800 whitespace-nowrap shrink-0 self-start sm:self-auto cursor-pointer"
+                      >
+                        重試上一句
+                      </button>
+                    )}
                   </div>
                 )}
 

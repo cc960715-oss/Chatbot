@@ -159,6 +159,65 @@ function isGossipOrSecretMessage(msg: string): boolean {
   return keywords.some((kw) => msg.includes(kw));
 }
 
+function getErrorStatus(err: unknown): number | undefined {
+  if (!err || typeof err !== 'object') return undefined;
+  const record = err as Record<string, unknown>;
+  if (typeof record.status === 'number') return record.status;
+  if (typeof record.code === 'number') return record.code;
+  if (record.error && typeof record.error === 'object') {
+    const inner = record.error as Record<string, unknown>;
+    if (typeof inner.code === 'number') return inner.code;
+  }
+  const msg = err instanceof Error ? err.message : String(err);
+  if (msg.includes('503') || msg.includes('UNAVAILABLE') || msg.includes('high demand')) return 503;
+  if (msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED')) return 429;
+  return undefined;
+}
+
+function isTransientError(err: unknown): boolean {
+  const status = getErrorStatus(err);
+  if (status === 503 || status === 429 || status === 500 || status === 502 || status === 504) {
+    return true;
+  }
+  const msg = err instanceof Error ? err.message : String(err);
+  return /UNAVAILABLE|high demand|overloaded|ETIMEDOUT|ECONNRESET|fetch failed/i.test(msg);
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function generateWithRetry(
+  contents: Parameters<typeof ai.models.generateContent>[0]['contents'],
+  config: Parameters<typeof ai.models.generateContent>[0]['config']
+) {
+  const modelsToTry = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'] as const;
+  let lastError: unknown;
+
+  for (const model of modelsToTry) {
+    const maxAttempts = model === 'gemini-4-hydrogen' ? 3 : 2;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        return await ai.models.generateContent({
+          model,
+          contents,
+          config,
+        });
+      } catch (err) {
+        lastError = err;
+        if (!isTransientError(err)) {
+          throw err;
+        }
+        const delayMs = 600 * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 250);
+        console.warn(
+          `[Gemini API] ${model} attempt ${attempt}/${maxAttempts} failed (${getErrorStatus(err) ?? 'transient'}), retrying in ${delayMs}ms...`
+        );
+        await sleep(delayMs);
+      }
+    }
+  }
+
+  throw lastError;
+}
+
 export async function startServer() {
   const app = express();
   app.use(express.json({ limit: '2mb' }));
@@ -313,54 +372,50 @@ ${WORLDVIEW_RAG_KNOWLEDGE}
         },
       ];
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
-        contents,
-        config: {
-          systemInstruction,
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              reply: {
-                type: Type.STRING,
-                description: '書靈的完整回覆台詞（含括號動作描寫，不含結尾狀態欄）。',
-              },
-              leavesDelta: {
-                type: Type.INTEGER,
-                description: '本回合樹葉子的增減變化（收費扣款為負數，打工獎勵為正數，無交易為 0）。',
-              },
-              chaoxiaoPresence: {
-                type: Type.STRING,
-                description: '朝曉狀態，必須為 inside_palace、passing_by、warning_delivered 或 banished 之一。',
-              },
-              mode: {
-                type: Type.STRING,
-                description: '對話模式，必須為 lively、gossip、official_survival 或 banished 之一。',
-              },
-              unlockedImage: {
-                type: Type.STRING,
-                description: '本回合成功購買解鎖的畫像檔名（xiexianyun.png、zhunxu.png、chaoxi.png、chaoxiao.png 或空字串 ""）。',
-              },
-              chaoxiaoQuote: {
-                type: Type.STRING,
-                description: '若本次觸發朝曉警告或逐客令，填寫朝曉說的台詞，否則為空字串。',
-              },
-              chaoxiDiscountMentioned: {
-                type: Type.BOOLEAN,
-                description: '訪客本次是否提到了是朝曦（或毀滅之神）介紹來的，以啟用少收 1 片葉子的優惠。',
-              },
+      const response = await generateWithRetry(contents, {
+        systemInstruction,
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            reply: {
+              type: Type.STRING,
+              description: '書靈的完整回覆台詞（含括號動作描寫，不含結尾狀態欄）。',
             },
-            required: [
-              'reply',
-              'leavesDelta',
-              'chaoxiaoPresence',
-              'mode',
-              'unlockedImage',
-              'chaoxiaoQuote',
-              'chaoxiDiscountMentioned',
-            ],
+            leavesDelta: {
+              type: Type.INTEGER,
+              description: '本回合樹葉子的增減變化（收費扣款為負數，打工獎勵為正數，無交易為 0）。',
+            },
+            chaoxiaoPresence: {
+              type: Type.STRING,
+              description: '朝曉狀態，必須為 inside_palace、passing_by、warning_delivered 或 banished 之一。',
+            },
+            mode: {
+              type: Type.STRING,
+              description: '對話模式，必須為 lively、gossip、official_survival 或 banished 之一。',
+            },
+            unlockedImage: {
+              type: Type.STRING,
+              description: '本回合成功購買解鎖的畫像檔名（xiexianyun.png、zhunxu.png、chaoxi.png、chaoxiao.png 或空字串 ""）。',
+            },
+            chaoxiaoQuote: {
+              type: Type.STRING,
+              description: '若本次觸發朝曉警告或逐客令，填寫朝曉說的台詞，否則為空字串。',
+            },
+            chaoxiDiscountMentioned: {
+              type: Type.BOOLEAN,
+              description: '訪客本次是否提到了是朝曦（或毀滅之神）介紹來的，以啟用少收 1 片葉子的優惠。',
+            },
           },
+          required: [
+            'reply',
+            'leavesDelta',
+            'chaoxiaoPresence',
+            'mode',
+            'unlockedImage',
+            'chaoxiaoQuote',
+            'chaoxiDiscountMentioned',
+          ],
         },
       });
 
@@ -501,6 +556,17 @@ ${WORLDVIEW_RAG_KNOWLEDGE}
       });
     } catch (error: unknown) {
       console.error('Chat API error:', error);
+      const status = getErrorStatus(error);
+      if (status === 503) {
+        return res.status(503).json({
+          error: '萬界樹靈脈目前請求過多（模型暫時高負載 503），書靈正在重整書架，請稍等幾秒後再試一次。',
+        });
+      }
+      if (status === 429) {
+        return res.status(429).json({
+          error: '請求過於頻繁（429），請稍候片刻再向書靈提問。',
+        });
+      }
       const errMsg = error instanceof Error ? error.message : '萬經閣與萬界樹的感應暫時中斷，請稍後再試。';
       return res.status(500).json({ error: errMsg });
     }
